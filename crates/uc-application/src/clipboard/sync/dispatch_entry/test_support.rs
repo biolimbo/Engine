@@ -7,7 +7,11 @@
 //! assert against the same ports from their own focused test module without
 //! re-deriving a mock per file. Names intentionally mirror the `mod.rs`
 //! inline doubles; the two live in different modules, so there is no clash.
+//!
+//! 离线投递恢复的测试也经 [`dispatch_use_case`] 使用真实发送用例与记录负责人，
+//! 不另造发送或结果通知入口。
 
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use async_trait::async_trait;
@@ -28,7 +32,10 @@ use uc_core::settings::model::Settings;
 use uc_core::{MemberRepositoryPort, MemberSyncPreferences, MembershipError, SpaceMember};
 use uc_observability_contract::analytics::{AnalyticsPort, Event};
 
-use super::DispatchClipboardEntryInput;
+use super::{DispatchClipboardEntryInput, DispatchClipboardEntryUseCase};
+use crate::deps::CurrentSpaceMemberScopePort;
+use uc_core::ports::security::{TransferCipherError, TransferCipherPort};
+use uc_core::ports::{DeviceIdentityPort, EntryDeliveryRepositoryPort};
 
 // ── mockall ports ───────────────────────────────────────────────────────
 
@@ -268,4 +275,70 @@ pub(crate) fn sync_payload() -> SyncPayload {
     SyncPayload {
         ciphertext: Bytes::from_static(b"ciphertext"),
     }
+}
+
+// ── real use case for recovery tests ────────────────────────────────────
+
+/// 不改变内容的加密端口：测试只关心投递结果，不关心密文。
+struct PassthroughCipher;
+#[async_trait]
+impl TransferCipherPort for PassthroughCipher {
+    async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, TransferCipherError> {
+        Ok(plaintext.to_vec())
+    }
+    async fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, TransferCipherError> {
+        Ok(encrypted.to_vec())
+    }
+}
+
+struct SelfDevice;
+impl DeviceIdentityPort for SelfDevice {
+    fn current_device_id(&self) -> DeviceId {
+        dev("local")
+    }
+}
+
+/// 真实的发送用例（含真实记录负责人），只替换投递、记录仓库、在线状态与成员范围端口。
+/// `targets` 是持有地址的成员，均按默认偏好允许发送。
+pub(crate) fn dispatch_use_case(
+    targets: &[DeviceId],
+    dispatch: Arc<dyn ClipboardDispatchPort>,
+    deliveries: Arc<dyn EntryDeliveryRepositoryPort>,
+    reachability: Arc<dyn PeerReachabilityPort>,
+    scope: Arc<dyn CurrentSpaceMemberScopePort>,
+) -> DispatchClipboardEntryUseCase {
+    let records: Vec<_> = targets
+        .iter()
+        .map(|target| record(target.as_str()))
+        .collect();
+    let mut peers = MockPeerAddrRepo::new();
+    peers.expect_list().returning(move || Ok(records.clone()));
+    let mut members = MockMemberRepo::new();
+    members
+        .expect_get()
+        .returning(|device| Ok(Some(member(device, MemberSyncPreferences::default()))));
+    let mut local_identity = MockLocalIdentity::new();
+    local_identity
+        .expect_get_current_fingerprint()
+        .returning(|| Ok(Some(fp(7))));
+    let mut settings = MockSettings_::new();
+    settings
+        .expect_load()
+        .returning(|| Ok(settings_with_device_name("Test Device")));
+    DispatchClipboardEntryUseCase::new_with_scope(
+        Arc::new(peers),
+        Arc::new(members),
+        reachability,
+        Arc::new(PassthroughCipher),
+        dispatch,
+        Arc::new(SelfDevice),
+        Arc::new(local_identity),
+        Arc::new(settings),
+        Arc::new(FixedClock(1)),
+        Arc::new(uc_observability_contract::analytics::NoopAnalyticsSink),
+        Arc::new(AllMarkedFirstSyncState),
+        deliveries,
+        Arc::new(crate::facade::HostEventBus::new()),
+        scope,
+    )
 }
