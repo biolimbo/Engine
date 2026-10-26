@@ -336,6 +336,7 @@ impl ClipboardAssembly {
         });
         let sync = Arc::new(ClipboardSyncRuntime::start(ClipboardSyncRuntimeDeps {
             outbound: Arc::clone(&outbound),
+            recoverable_deliveries: session.clipboard_sync.recoverable_deliveries(),
             settings: Arc::clone(&self.deps.settings),
             inbound,
             peer_reachability: session.peer_reachability,
