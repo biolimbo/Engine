@@ -64,7 +64,7 @@ impl IrohConnectionAdmission {
             return Err(ConnectivityError::Denied);
         }
         if !self.connections.current(&peer, epoch) {
-            return Err(ConnectivityError::Invalidated);
+            return Err(ConnectivityError::Invalidated(None));
         }
         Ok(())
     }
@@ -74,7 +74,8 @@ impl IrohConnectionAdmission {
     async fn stale(&self, peer: &DeviceId) -> ConnectivityError {
         match self.admission.is_admitted(peer).await {
             Ok(false) => ConnectivityError::Denied,
-            Ok(true) | Err(_) => ConnectivityError::Invalidated,
+            Ok(true) => ConnectivityError::Invalidated(None),
+            Err(error) => ConnectivityError::Invalidated(Some(Box::new(error))),
         }
     }
     async fn adopt(
@@ -166,7 +167,7 @@ impl AdmissionGrant for Grant {
             && (self.owner.protocol != InboundPeerProtocol::Presence
                 || matches!(
                     result,
-                    Err(ConnectivityError::Denied | ConnectivityError::Invalidated)
+                    Err(ConnectivityError::Denied | ConnectivityError::Invalidated(_))
                 ))
         {
             self.connection.close();
@@ -223,7 +224,7 @@ impl SessionConnectionAdmissionPort for IrohConnectionAdmission {
         if let Err(error) = &result {
             let rejection = if matches!(
                 error,
-                ConnectivityError::Denied | ConnectivityError::Invalidated
+                ConnectivityError::Denied | ConnectivityError::Invalidated(_)
             ) {
                 InboundPeerRejection::LedgerDenied
             } else {
