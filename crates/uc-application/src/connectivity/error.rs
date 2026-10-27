@@ -25,6 +25,10 @@ pub enum ConnectivityError {
     ExchangeAlreadyUsed,
     #[error("peer admission denied")]
     Denied,
+    /// 请求的撤销快照已失效（例如锁定准备暂停全部连接），但成员权威未确认拒绝。旧请求仍被
+    /// 围栏拒绝；只有新请求才会重新读取当前成员权威。
+    #[error("peer admission request invalidated")]
+    Invalidated,
     #[error("connection operation deadline expired")]
     DeadlineExpired,
     #[error("connection operation timed out")]
@@ -80,13 +84,18 @@ impl ConnectivityError {
     }
     pub fn is_unavailable(&self) -> bool {
         match self {
-            Self::Offline | Self::AddressMissing | Self::Backend(_) | Self::Denied => true,
+            Self::Offline
+            | Self::AddressMissing
+            | Self::Backend(_)
+            | Self::Denied
+            | Self::Invalidated => true,
             Self::Shared(error) => error.is_unavailable(),
             _ => false,
         }
     }
-    /// 准入授权拒绝（含经共享拨号结果返回的拒绝）。`is_unavailable` 为既有调用方把它算作
-    /// 不可用；需要区分终态授权失败的边界必须先用本判断。
+    /// 准入授权拒绝（含经共享拨号结果返回的拒绝）：成员权威拒绝或身份不符。`is_unavailable`
+    /// 为既有调用方把它算作不可用；需要区分终态授权失败的边界必须先用本判断。请求失效
+    /// （`Invalidated`）不是拒绝。
     pub fn is_denied(&self) -> bool {
         match self {
             Self::Denied => true,
@@ -123,6 +132,7 @@ impl ErrorClass for ConnectivityError {
             Self::Task(_) => "connection_task_failed",
             Self::ExchangeAlreadyUsed => "connection_exchange_already_used",
             Self::Denied => "connection_admission_denied",
+            Self::Invalidated => "connection_admission_invalidated",
             Self::DeadlineExpired | Self::TimedOut(_) => "connection_timeout",
             Self::AdmissionTimedOut(_) | Self::AdmissionDeadlineExpired => {
                 "connection_admission_timeout"
@@ -164,6 +174,7 @@ mod tests {
         }
         for error in [
             ConnectivityError::Denied,
+            ConnectivityError::Invalidated,
             ConnectivityError::Stopped,
             ConnectivityError::Offline,
             ConnectivityError::AddressMissing,
@@ -175,7 +186,7 @@ mod tests {
         }
     }
 
-    /// 授权拒绝可穿过共享拨号结果识别；不改变既有不可用判断。
+    /// 授权拒绝可穿过共享拨号结果识别；请求失效不是拒绝。两者都不改变既有不可用判断。
     #[test]
     fn denial_is_recognized_through_shared_results() {
         let shared = ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Shared(
@@ -186,6 +197,8 @@ mod tests {
         for error in [
             ConnectivityError::Offline,
             ConnectivityError::AddressMissing,
+            ConnectivityError::Invalidated,
+            ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Invalidated)),
             ConnectivityError::Backend(Box::new(std::io::Error::other("unreachable"))),
             ConnectivityError::Shared(std::sync::Arc::new(ConnectivityError::Offline)),
         ] {
